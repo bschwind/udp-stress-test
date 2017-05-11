@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::{thread, time};
 use std::rc::Rc;
+use std::time::Duration;
 
 use clap::{Arg, App, SubCommand};
 
@@ -37,7 +38,7 @@ use futures::stream;
 use futures::stream::Once;
 
 const MAX_PACKET_BYTES: usize = 1220;
-const MAX_CLIENTS: usize = 1;
+const MAX_CLIENTS: usize = 1024;
 const SERVER_IP: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 55777;
 
@@ -157,7 +158,7 @@ fn run_server(buf: Vec<u8>, core: Core) {
 	// End Streams
 }
 
-fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, handle: Handle, stop_rx: oneshot::Receiver<()>) {
+fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: Duration, timer: Timer, handle: Handle, stop_rx: oneshot::Receiver<()>) {
 	let addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 0);
 	let server_addr = SocketAddr::new(IpAddr::from_str(SERVER_IP).unwrap(), SERVER_PORT);
 
@@ -172,7 +173,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 	// Streams
 	let (sink, stream) = socket.framed(ClientCodec).split();
 
-	let duration = time::Duration::from_millis(200); // 10 Hz
+	let duration = Duration::from_millis(101); // 10 Hz
 	let wakeups = timer.interval(duration);
 
 	// let interval_send = wakeups
@@ -188,7 +189,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 		0
 	};
 
-	let delay_future = timer.sleep(time::Duration::from_millis(delay_ms));
+	let delay_future = timer.sleep(Duration::from_millis(delay_ms));
 
 	// let interval_send_future = delay_future.then(|_| {
 	// 	interval_send.forward(sink).map(|_| ()).map_err(|_| ())
@@ -212,7 +213,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 	// 		Ok(())
 	// 	});
 
-	// let thing = timer.timeout(final_future, time::Duration::from_millis(1000)).then(move |hmm| {
+	// let thing = timer.timeout(final_future, Duration::from_millis(1000)).then(move |hmm| {
 	// 	println!("Really done!");
 
 	// 	Err(())
@@ -229,9 +230,9 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 		.map_err(|e| io::Error::new(io::ErrorKind::Other, e));
 
 	let send_counter_stream = CoolShit::stream_completion_pact(send_stream, stop_rx.into_stream())
+	// let send_counter_stream = send_stream
 		.fold((0 as u64, sink), move |(send_count, mut sink), _| {
 			sink.start_send(ret_val.clone());
-			println!("Sending...");
 			ok::<_, io::Error>((send_count + 1, sink))
 		})
 
@@ -253,11 +254,11 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 		// 	Ok(())
 		// });
 
-	let dummy_stream_2 = timer.sleep(time::Duration::from_millis(2000));
+	let dummy_stream_2 = timer.sleep(run_duration + Duration::from_millis(500));
 	let read_counter_stream = CoolShit::stream_completion_pact(stream, dummy_stream_2.into_stream())
+	// let read_counter_stream = stream
 		.fold(0 as u64, move |recv_count, _| {
 			// ok(a + 1) // This doesn't work, type inference fails
-			println!("Receiving...");
 			ok::<_, io::Error>(recv_count + 1)
 		})
 		// .map(|x| c(x))
@@ -318,7 +319,8 @@ fn main() {
 	} else {
 		let (forever_tx, forever_rx) = oneshot::channel::<i32>();
 
-		let timer = tokio_timer::wheel().tick_duration(time::Duration::from_millis(30)).build();
+		let timer = tokio_timer::wheel().tick_duration(Duration::from_millis(30)).build();
+		let run_duration = Duration::from_millis(1000);
 
 		let mut client_chans = Vec::new();
 
@@ -326,10 +328,10 @@ fn main() {
 			let (tx, rx) = oneshot::channel::<()>(); // Channel of (client_index, receive_count, send_count)
 			client_chans.push(tx);
 
-			run_client(&buf, n as u16, randomize_starts, timer.clone(), core.handle().clone(), rx);
+			run_client(&buf, n as u16, randomize_starts, run_duration, timer.clone(), core.handle().clone(), rx);
 		}
 
-		let client_delay_timeout = timer.sleep(time::Duration::from_millis(1000)).and_then(|_| {
+		let client_delay_timeout = timer.sleep(run_duration).and_then(|_| {
 			println!("Done!");
 			
 			for transmitter in client_chans {
