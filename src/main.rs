@@ -37,7 +37,7 @@ use futures::stream;
 use futures::stream::Once;
 
 const MAX_PACKET_BYTES: usize = 1220;
-const MAX_CLIENTS: usize = 128;
+const MAX_CLIENTS: usize = 1;
 const SERVER_IP: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 55777;
 
@@ -224,14 +224,22 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 
 	// let mut dummy_stream_1: Once<u64, io::Error> = stream::once(Ok(17));
 	// let mut dummy_stream_2: Once<u64, io::Error> = stream::once(Ok(17));
-	let dummy_stream_2 = timer.sleep(time::Duration::from_millis(2000));
 
-	let send_counter_stream = CoolShit::stream_completion_pact(wakeups.map_err(|e| io::Error::new(io::ErrorKind::Other, e)), dummy_stream_2.into_stream())
-		.fold(0 as u64, move |send_count, _| {
-			println!("Adding!");
-			// ok(a + 1) // This doesn't work, type inference fails
-			ok::<_, io::Error>(send_count + 1)
+	let send_stream = wakeups
+		.map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+
+	let send_counter_stream = CoolShit::stream_completion_pact(send_stream, stop_rx.into_stream())
+		.fold((0 as u64, sink), move |(send_count, mut sink), _| {
+			sink.start_send(ret_val.clone());
+			ok::<_, io::Error>((send_count + 1, sink)) // TODO - send count is 1 greater than reality
 		})
+
+		// .fold(0 as u64, move |send_count, _| {
+		// 	println!("Adding!");
+		// 	// ok(a + 1) // This doesn't work, type inference fails
+		// 	ok::<_, io::Error>(send_count + 1)
+		// })
+
 		// .map(|x| c(x))
 		.map_err(|_| ());
 		// .then(move |result| -> Result<(), ()> {
@@ -240,9 +248,9 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 		// 	Ok(())
 		// });
 
-	let read_counter_stream = CoolShit::stream_completion_pact(stream, stop_rx.into_stream())
+	let dummy_stream_2 = timer.sleep(time::Duration::from_millis(2000));
+	let read_counter_stream = CoolShit::stream_completion_pact(stream, dummy_stream_2.into_stream())
 		.fold(0 as u64, move |recv_count, _| {
-			println!("Adding!");
 			// ok(a + 1) // This doesn't work, type inference fails
 			ok::<_, io::Error>(recv_count + 1)
 		})
@@ -263,14 +271,16 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 		// });
 
 
-	let final_future = send_counter_stream.join(read_counter_stream).then(move |result| {
-		match result {
-			Ok((send_count, read_count)) => println!("Client {} done with result: Sent: {}, Received: {}", index, send_count, read_count),
-			Err(e) => println!("Error: {:?}", e)
-		}
+	let final_future = send_counter_stream
+		.join(read_counter_stream)
+		.then(move |result| {
+			match result {
+				Ok((send_count, read_count)) => println!("Client {} done with result: Sent: {}, Received: {}", index, send_count.0, read_count),
+				Err(e) => println!("Error: {:?}", e)
+			}
 
-		Ok(())
-	});
+			Ok(())
+		});
 
 	handle.spawn(final_future);
 	// End Streams
