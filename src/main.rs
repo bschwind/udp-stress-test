@@ -190,7 +190,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 			send_counter_future
 		});
 
-	let dummy_stream_2 = timer.sleep(run_duration + Duration::from_millis(500));
+	let dummy_stream_2 = timer.sleep(run_duration + Duration::from_millis(500)); // Give the receive loop a bit of extra time to complete
 	let read_counter_future = my_adapters::stream_completion_pact(stream, dummy_stream_2.into_stream())
 		.fold(0 as u64, move |recv_count, _| {
 			// ok(recv_count + 1) // This doesn't work, type inference fails
