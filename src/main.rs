@@ -151,7 +151,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 	let ret_val = Rc::new((server_addr, client_buf));
 	let (sink, stream) = socket.framed(ClientCodec).split();
 
-	let duration = Duration::from_millis(40); // 10 Hz
+	let duration = Duration::from_millis(100); // 10 Hz
 	let wakeups = timer.interval(duration);
 
 	let delay_ms = if randomize_starts {
@@ -172,7 +172,14 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 			ok::<_, io::Error>((send_count + 1, sink))
 		})
 		.map(|(send_count, mut sink)| {
-			sink.poll_complete(); // Send any buffered output
+			// Send any buffered output
+			match sink.poll_complete() {
+				Ok(_) => {}
+				Err(e) => {
+					println!("Error closing sink: {:?}", e);
+				}
+			}
+
 			(send_count, sink)
 		})
 		.map_err(|_| ());
