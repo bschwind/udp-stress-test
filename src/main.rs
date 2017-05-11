@@ -172,7 +172,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 	// Streams
 	let (sink, stream) = socket.framed(ClientCodec).split();
 
-	let duration = time::Duration::from_millis(101); // 10 Hz
+	let duration = time::Duration::from_millis(200); // 10 Hz
 	let wakeups = timer.interval(duration);
 
 	// let interval_send = wakeups
@@ -231,7 +231,8 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 	let send_counter_stream = CoolShit::stream_completion_pact(send_stream, stop_rx.into_stream())
 		.fold((0 as u64, sink), move |(send_count, mut sink), _| {
 			sink.start_send(ret_val.clone());
-			ok::<_, io::Error>((send_count + 1, sink)) // TODO - send count is 1 greater than reality
+			println!("Sending...");
+			ok::<_, io::Error>((send_count + 1, sink))
 		})
 
 		// .fold(0 as u64, move |send_count, _| {
@@ -240,7 +241,11 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 		// 	ok::<_, io::Error>(send_count + 1)
 		// })
 
-		// .map(|x| c(x))
+		.map(|(send_count, mut sink)| {
+			// c(sink)
+			sink.poll_complete(); // Send any buffered output
+			(send_count, sink)
+		})
 		.map_err(|_| ());
 		// .then(move |result| -> Result<(), ()> {
 		// 	// c(result);
@@ -252,6 +257,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 	let read_counter_stream = CoolShit::stream_completion_pact(stream, dummy_stream_2.into_stream())
 		.fold(0 as u64, move |recv_count, _| {
 			// ok(a + 1) // This doesn't work, type inference fails
+			println!("Receiving...");
 			ok::<_, io::Error>(recv_count + 1)
 		})
 		// .map(|x| c(x))
