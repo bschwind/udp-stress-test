@@ -38,7 +38,7 @@ use futures::stream;
 use futures::stream::Once;
 
 const MAX_PACKET_BYTES: usize = 1220;
-const MAX_CLIENTS: usize = 1024;
+const MAX_CLIENTS: usize = 128;
 const SERVER_IP: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 55777;
 
@@ -146,15 +146,17 @@ fn run_server(buf: Vec<u8>, core: Core) {
 		let client_id = LittleEndian::read_u16(&msg);
 		recv_counts[client_id as usize] += 1;
 
-		println!("Client ID: {}", client_id);
-		println!("{:?}", recv_counts);
+		// println!("Client ID: {}", client_id);
+		// println!("{:?}", recv_counts);
 
 		(addr, msg)
 	});
 
-	let echo_stream = print_addr_stream.forward(sink);
+	let echo_stream = print_addr_stream.forward(sink).and_then(|_| Ok(()));
 
-	core.run(echo_stream);
+	let thing = core.run(echo_stream);
+
+	println!("Result: {:?}", thing);
 	// End Streams
 }
 
@@ -163,7 +165,6 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 	let server_addr = SocketAddr::new(IpAddr::from_str(SERVER_IP).unwrap(), SERVER_PORT);
 
 	let socket = UdpSocket::bind(&addr, &handle).unwrap();
-	println!("Running on: {}", socket.local_addr().unwrap());
 
 	let mut client_buf = buf.clone();
 	LittleEndian::write_u16(&mut client_buf, index);
@@ -173,7 +174,7 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 	// Streams
 	let (sink, stream) = socket.framed(ClientCodec).split();
 
-	let duration = Duration::from_millis(101); // 10 Hz
+	let duration = Duration::from_millis(40); // 10 Hz
 	let wakeups = timer.interval(duration);
 
 	// let interval_send = wakeups
@@ -336,8 +337,6 @@ fn main() {
 			
 			for transmitter in client_chans {
 				transmitter.send(());
-				// let thing = rx.wait();
-				// println!("{:?}", thing);
 			}
 
 			Ok(())
@@ -345,6 +344,10 @@ fn main() {
 
 		core.run(client_delay_timeout).unwrap();
 
-		core.run(forever_rx).unwrap();
+		// Give the clients some time to print their results
+		// TODO - make this more robust
+		let client_delay_timeout = timer.sleep(Duration::from_millis(1000));
+
+		core.run(client_delay_timeout).unwrap();
 	}
 }
