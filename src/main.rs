@@ -1,6 +1,5 @@
 extern crate bytes;
 extern crate futures;
-#[macro_use]
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_proto;
@@ -14,11 +13,10 @@ use std::io;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::{thread, time};
 use std::rc::Rc;
 use std::time::Duration;
 
-use clap::{Arg, App, SubCommand};
+use clap::{Arg, App};
 
 use rand::{thread_rng, Rng};
 
@@ -29,28 +27,18 @@ use tokio_core::net::{UdpSocket, UdpCodec};
 
 use tokio_timer::Timer;
 
-use futures::{Future, Poll};
+use futures::Future;
 use futures::{Sink, Stream};
 use futures::future::ok;
 use futures::sync::oneshot;
-use futures::sync::mpsc::UnboundedSender;
-use futures::stream;
-use futures::stream::Once;
 
 const MAX_PACKET_BYTES: usize = 1220;
 const MAX_CLIENTS: usize = 128;
 const SERVER_IP: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 55777;
 
-mod CoolShit {
-	use tokio_core::reactor::Core;
-	use futures::sync::mpsc::unbounded;
-	use tokio_core::net::TcpListener;
-	use std::net::SocketAddr;
-	use std::str::FromStr;
-	use futures::{Async, Stream, Future, Poll};
-	use std::thread;
-	use std::time::Duration;
+mod my_adapters {
+	use futures::{Async, Stream, Poll};
 
 	pub struct CompletionPact<S, C>
 		where S: Stream,
@@ -83,7 +71,7 @@ mod CoolShit {
 				Err(_) |
 				Ok(Async::Ready(Some(_))) => {
 					// We are done, forget us
-					Ok(Async::Ready(None)) // <<<<<< (3)
+					Ok(Async::Ready(None))
 				},
 				Ok(Async::NotReady) => {
 					self.stream.poll()
@@ -126,9 +114,8 @@ impl UdpCodec for ClientCodec {
 	}
 }
 
-fn run_server(buf: Vec<u8>, core: Core) {
+fn run_server(buf: Vec<u8>) {
 	let mut recv_counts = vec![0 as u64; MAX_CLIENTS];
-	// let addr = SocketAddr::new(IpAddr::from_str("::1").unwrap(), 40000);
 	let addr = SocketAddr::new(IpAddr::from_str(SERVER_IP).unwrap(), SERVER_PORT);
 
 	let mut core = Core::new().unwrap();
@@ -137,27 +124,19 @@ fn run_server(buf: Vec<u8>, core: Core) {
 	let socket = UdpSocket::bind(&addr, &handle).unwrap();
 	println!("Listening on: {}", addr);
 
-	// Streams
 	let (sink, stream) = socket.framed(ServerCodec).split();
 
 	let print_addr_stream = stream.map(|(addr, msg)| {
-
-		// let client_id = msg.get_u16::<LittleEndian>();
 		let client_id = LittleEndian::read_u16(&msg);
 		recv_counts[client_id as usize] += 1;
 
-		// println!("Client ID: {}", client_id);
-		// println!("{:?}", recv_counts);
-
-		(addr, msg)
+		(addr, msg) // TODO - send buf instead of echoing
 	});
 
 	let echo_stream = print_addr_stream.forward(sink).and_then(|_| Ok(()));
+	let server = core.run(echo_stream);
 
-	let thing = core.run(echo_stream);
-
-	println!("Result: {:?}", thing);
-	// End Streams
+	println!("Result: {:?}", server);
 }
 
 fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: Duration, timer: Timer, handle: Handle, stop_rx: oneshot::Receiver<()>) {
@@ -170,18 +149,10 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 	LittleEndian::write_u16(&mut client_buf, index);
 
 	let ret_val = Rc::new((server_addr, client_buf));
-
-	// Streams
 	let (sink, stream) = socket.framed(ClientCodec).split();
 
 	let duration = Duration::from_millis(40); // 10 Hz
 	let wakeups = timer.interval(duration);
-
-	// let interval_send = wakeups
-	// 	.map(move |_| {
-	// 		ret_val.clone()
-	// 	})
-	// 	.map_err(|e| io::Error::new(io::ErrorKind::Other, e));
 
 	let delay_ms = if randomize_starts {
 		let mut rng = thread_rng();
@@ -190,97 +161,38 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 		0
 	};
 
-	let delay_future = timer.sleep(Duration::from_millis(delay_ms));
-
-	// let interval_send_future = delay_future.then(|_| {
-	// 	interval_send.forward(sink).map(|_| ()).map_err(|_| ())
-	// });
-
-	// let counter_future = stream
-	// 	.for_each(move |_| {
-
-	// 		// println!("Client {}: {}", index, recv_count);
-
-	// 		Ok(())
-	// 	})
-	// 	.map_err(|_| {
-	// 		println!("OH NO");
-	// 	});
-
-	// let final_future = counter_future
-	// 	.select(interval_send_future)
-	// 	.then(move |_| -> Result<(), ()> {
-	// 		println!("Done");
-	// 		Ok(())
-	// 	});
-
-	// let thing = timer.timeout(final_future, Duration::from_millis(1000)).then(move |hmm| {
-	// 	println!("Really done!");
-
-	// 	Err(())
-	// });
-
-	fn c(x: ()) {
-
-	}
-
-	// let mut dummy_stream_1: Once<u64, io::Error> = stream::once(Ok(17));
-	// let mut dummy_stream_2: Once<u64, io::Error> = stream::once(Ok(17));
-
 	let send_stream = wakeups
 		.map_err(|e| io::Error::new(io::ErrorKind::Other, e));
 
-	let send_counter_stream = CoolShit::stream_completion_pact(send_stream, stop_rx.into_stream())
-	// let send_counter_stream = send_stream
+	let send_counter_future = my_adapters::stream_completion_pact(send_stream, stop_rx.into_stream())
 		.fold((0 as u64, sink), move |(send_count, mut sink), _| {
-			sink.start_send(ret_val.clone());
+			let _ = sink.start_send(ret_val.clone()); // TODO - use this result
+
+			// ok((send_count + 1, sink)) // This doesn't work, type inference fails
 			ok::<_, io::Error>((send_count + 1, sink))
 		})
-
-		// .fold(0 as u64, move |send_count, _| {
-		// 	println!("Adding!");
-		// 	// ok(a + 1) // This doesn't work, type inference fails
-		// 	ok::<_, io::Error>(send_count + 1)
-		// })
-
 		.map(|(send_count, mut sink)| {
-			// c(sink)
 			sink.poll_complete(); // Send any buffered output
 			(send_count, sink)
 		})
 		.map_err(|_| ());
-		// .then(move |result| -> Result<(), ()> {
-		// 	// c(result);
-		// 	println!("Client {} done with result: {:?}", index, result);
-		// 	Ok(())
-		// });
+
+
+	let delayed_send_counter_future = timer.sleep(Duration::from_millis(delay_ms))
+		.then(move |_| {
+			send_counter_future
+		});
 
 	let dummy_stream_2 = timer.sleep(run_duration + Duration::from_millis(500));
-	let read_counter_stream = CoolShit::stream_completion_pact(stream, dummy_stream_2.into_stream())
-	// let read_counter_stream = stream
+	let read_counter_future = my_adapters::stream_completion_pact(stream, dummy_stream_2.into_stream())
 		.fold(0 as u64, move |recv_count, _| {
-			// ok(a + 1) // This doesn't work, type inference fails
+			// ok(recv_count + 1) // This doesn't work, type inference fails
 			ok::<_, io::Error>(recv_count + 1)
 		})
-		// .map(|x| c(x))
 		.map_err(|_| ());
-		// .then(move |result| {
-		// 	println!("Client {} done with result: {:?}", index, result);
-		// 	Ok(())
-		// });
 
-		// .for_each(move |a| {
-		// 	println!("{:?}", a);
-		// 	Ok(())
-		// })
-		// .then(move |_| {
-		// 	println!("Client {} done", index);
-		// 	Ok(())
-		// });
-
-
-	let final_future = send_counter_stream
-		.join(read_counter_stream)
+	let final_future = delayed_send_counter_future
+		.join(read_counter_future)
 		.then(move |result| {
 			match result {
 				Ok((send_count, read_count)) => println!("Client {} done with result: Sent: {}, Received: {}", index, send_count.0, read_count),
@@ -291,7 +203,6 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: D
 		});
 
 	handle.spawn(final_future);
-	// End Streams
 }
 
 fn main() {
@@ -316,12 +227,10 @@ fn main() {
 	let mut core = Core::new().unwrap();
 
 	if should_run_server {
-		run_server(buf, core);
+		run_server(buf);
 	} else {
-		let (forever_tx, forever_rx) = oneshot::channel::<i32>();
-
 		let timer = tokio_timer::wheel().tick_duration(Duration::from_millis(30)).build();
-		let run_duration = Duration::from_millis(1000);
+		let run_duration = Duration::from_millis(3000);
 
 		let mut client_chans = Vec::new();
 
@@ -336,7 +245,7 @@ fn main() {
 			println!("Done!");
 			
 			for transmitter in client_chans {
-				transmitter.send(());
+				let _ = transmitter.send(());
 			}
 
 			Ok(())
