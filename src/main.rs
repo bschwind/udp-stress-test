@@ -30,72 +30,64 @@ use tokio_timer::Timer;
 
 use futures::{Future, Poll};
 use futures::{Sink, Stream};
+use futures::future::ok;
 use futures::sync::oneshot;
 use futures::sync::mpsc::UnboundedSender;
+use futures::stream;
+use futures::stream::Once;
 
 const MAX_PACKET_BYTES: usize = 1220;
 const MAX_CLIENTS: usize = 128;
 const SERVER_IP: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 55777;
 
-struct NetcodeConn {
-	socket: UdpSocket,
-	buf: Vec<u8>
-}
+mod CoolShit {
+	use tokio_core::reactor::Core;
+	use futures::sync::mpsc::unbounded;
+	use tokio_core::net::TcpListener;
+	use std::net::SocketAddr;
+	use std::str::FromStr;
+	use futures::{Async, Stream, Future, Poll};
+	use std::thread;
+	use std::time::Duration;
 
-struct Server {
-	conn: NetcodeConn,
-	recv_counts: Vec<u64>,
-	to_send: Option<SocketAddr>
-}
+	pub struct CompletionPact<S, C>
+		where S: Stream,
+			  C: Stream, 
+	{
+		stream: S,
+		completer: C,
+	}
 
-struct Client {
-	conn: NetcodeConn,
-	recv_count: u64,
-	server_addr: SocketAddr
-}
-
-impl Future for Server {
-	type Item = ();
-	type Error = io::Error;
-
-	fn poll(&mut self) -> Poll<(), io::Error> {
-		loop {
-			if let Some(send_to_addr) = self.to_send {
-				let amount = try_nb!(self.conn.socket.send_to(&self.conn.buf, &send_to_addr));
-				println!("Sent {} bytes", amount);
-				self.to_send = None;
-			}
-
-			let (count, from_addr) = try_nb!(self.conn.socket.recv_from(&mut self.conn.buf));
-
-			let client_id = LittleEndian::read_u16(&self.conn.buf);
-			println!("Client ID: {}", client_id);
-
-			self.recv_counts[client_id as usize] += 1;
-			self.to_send = Some(from_addr);
-
-			// println!("{:?}", self.conn.buf);
-			println!("{:?}", self.recv_counts);
+	pub fn stream_completion_pact<S, C>(s: S, c: C) -> CompletionPact<S, C>
+		where S: Stream,
+			  C: Stream,
+	{
+		CompletionPact {
+			stream: s,
+			completer: c,
 		}
 	}
-}
 
-impl Future for Client {
-	type Item = ();
-	type Error = io::Error;
+	impl<S, C> Stream for CompletionPact<S, C>
+		where S: Stream,
+			  C: Stream,
+	{
+		type Item = S::Item;
+		type Error = S::Error;
 
-	fn poll(&mut self) -> Poll<(), io::Error> {
-		loop {
-			let amount = try_nb!(self.conn.socket.send_to(&self.conn.buf, &self.server_addr));
-			println!("Sent {} bytes", amount);
-
-			let (count, from_addr) = try_nb!(self.conn.socket.recv_from(&mut self.conn.buf));
-
-			// // println!("Client ID: {}", client_id);
-
-			self.recv_count += 1;
-			println!("Count is {}", self.recv_count);
+		fn poll(&mut self) -> Poll<Option<S::Item>, S::Error> {
+			match self.completer.poll() {
+				Ok(Async::Ready(None)) |
+				Err(_) |
+				Ok(Async::Ready(Some(_))) => {
+					// We are done, forget us
+					Ok(Async::Ready(None)) // <<<<<< (3)
+				},
+				Ok(Async::NotReady) => {
+					self.stream.poll()
+				},
+			}
 		}
 	}
 }
@@ -144,26 +136,10 @@ fn run_server(buf: Vec<u8>, core: Core) {
 	let socket = UdpSocket::bind(&addr, &handle).unwrap();
 	println!("Listening on: {}", addr);
 
-	// Old impl
-	// let conn = NetcodeConn {
-	// 	socket: socket,
-	// 	buf: buf
-	// };
-
-	// let server = Server {
-	// 	conn: conn,
-	// 	recv_counts: recv_counts,
-	// 	to_send: None
-	// };
-	// End old impl
-
 	// Streams
-	// let (tx, rx) = futures::sync::mpsc::unbounded();
 	let (sink, stream) = socket.framed(ServerCodec).split();
 
 	let print_addr_stream = stream.map(|(addr, msg)| {
-		// println!("lol: {:?}", addr);
-		// println!("lol: {:?}", msg);
 
 		// let client_id = msg.get_u16::<LittleEndian>();
 		let client_id = LittleEndian::read_u16(&msg);
@@ -172,88 +148,38 @@ fn run_server(buf: Vec<u8>, core: Core) {
 		println!("Client ID: {}", client_id);
 		println!("{:?}", recv_counts);
 
-		// sink.send((addr, vec!(3, 2, 1)));
-		// tx.send((addr, msg));
-
-		// Ok(())
 		(addr, msg)
 	});
 
-	// let echo_stream = sink.send_all(print_addr_stream);
 	let echo_stream = print_addr_stream.forward(sink);
 
 	core.run(echo_stream);
 	// End Streams
-
-	// core.run(server).unwrap();
 }
 
-fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, handle: Handle, tx: oneshot::Sender<(u16, u64, u64)>) {
+fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, handle: Handle, stop_rx: oneshot::Receiver<()>) {
 	let addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 0);
 	let server_addr = SocketAddr::new(IpAddr::from_str(SERVER_IP).unwrap(), SERVER_PORT);
-
-	// let mut core = Core::new().unwrap();
-	// let handle = core.handle();
 
 	let socket = UdpSocket::bind(&addr, &handle).unwrap();
 	println!("Running on: {}", socket.local_addr().unwrap());
 
 	let mut client_buf = buf.clone();
 	LittleEndian::write_u16(&mut client_buf, index);
-	let mut recv_count: u64 = 0;
 
 	let ret_val = Rc::new((server_addr, client_buf));
-
-	// Old impl
-	// let conn = NetcodeConn {
-	// 	socket: socket,
-	// 	buf: client_buf
-	// };
-
-	// let client = Client {
-	// 	conn: conn,
-	// 	recv_count: 0,
-	// 	server_addr: server_addr
-	// };
-	// let duration = time::Duration::from_millis(100); // 10 Hz
-	// let wakeups = timer.interval(duration);
-
-	// let whatever = wakeups
-	// .and_then(|_| {
-	// 	println!("WAKE UP!");
-
-	// 	Ok(())
-	// })
-	// .for_each(|_| {
-	// 	Ok(())
-	// })
-	// .then(|_| Ok(()));
-
-	// handle.spawn(whatever);
-
-	// let future_chain = client
-	// 	.then(|_| Ok(()));
-		// .map(|_| ())
-		// .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
-
-	// println!("{:?}", buf);
-
-	// core.run(client).unwrap();
-	// handle.spawn(future_chain);
-	// End Old impl
 
 	// Streams
 	let (sink, stream) = socket.framed(ClientCodec).split();
 
-	// let duration = time::Duration::from_millis(100); // 10 Hz
 	let duration = time::Duration::from_millis(101); // 10 Hz
 	let wakeups = timer.interval(duration);
 
-	let interval_send = wakeups
-		.map(move |_| {
-			ret_val.clone()
-		})
-		.map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+	// let interval_send = wakeups
+	// 	.map(move |_| {
+	// 		ret_val.clone()
+	// 	})
+	// 	.map_err(|e| io::Error::new(io::ErrorKind::Other, e));
 
 	let delay_ms = if randomize_starts {
 		let mut rng = thread_rng();
@@ -264,40 +190,89 @@ fn run_client(buf: &Vec<u8>, index: u16, randomize_starts: bool, timer: Timer, h
 
 	let delay_future = timer.sleep(time::Duration::from_millis(delay_ms));
 
-	let interval_send_future = delay_future.then(|_| {
-		interval_send.forward(sink).map(|_| ()).map_err(|_| ())
-	});
+	// let interval_send_future = delay_future.then(|_| {
+	// 	interval_send.forward(sink).map(|_| ()).map_err(|_| ())
+	// });
 
-	let counter_future = stream
-		.for_each(move |_| {
-			recv_count += 1;
+	// let counter_future = stream
+	// 	.for_each(move |_| {
 
-			println!("Client {}: {}", index, recv_count);
+	// 		// println!("Client {}: {}", index, recv_count);
 
-			Ok(())
+	// 		Ok(())
+	// 	})
+	// 	.map_err(|_| {
+	// 		println!("OH NO");
+	// 	});
+
+	// let final_future = counter_future
+	// 	.select(interval_send_future)
+	// 	.then(move |_| -> Result<(), ()> {
+	// 		println!("Done");
+	// 		Ok(())
+	// 	});
+
+	// let thing = timer.timeout(final_future, time::Duration::from_millis(1000)).then(move |hmm| {
+	// 	println!("Really done!");
+
+	// 	Err(())
+	// });
+
+	fn c(x: ()) {
+
+	}
+
+	// let mut dummy_stream_1: Once<u64, io::Error> = stream::once(Ok(17));
+	// let mut dummy_stream_2: Once<u64, io::Error> = stream::once(Ok(17));
+	let dummy_stream_2 = timer.sleep(time::Duration::from_millis(2000));
+
+	let send_counter_stream = CoolShit::stream_completion_pact(wakeups.map_err(|e| io::Error::new(io::ErrorKind::Other, e)), dummy_stream_2.into_stream())
+		.fold(0 as u64, move |send_count, _| {
+			println!("Adding!");
+			// ok(a + 1) // This doesn't work, type inference fails
+			ok::<_, io::Error>(send_count + 1)
 		})
-		.map_err(|_| {
-			println!("OH NO");
-		});
+		// .map(|x| c(x))
+		.map_err(|_| ());
+		// .then(move |result| -> Result<(), ()> {
+		// 	// c(result);
+		// 	println!("Client {} done with result: {:?}", index, result);
+		// 	Ok(())
+		// });
 
-	let final_future = counter_future
-		.select(interval_send_future)
-		.then(move |_| -> Result<u64, ()> {
-			println!("Done");
-			// Ok(())
-			tx.send((index, recv_count, 0));
-			Ok(17)
-		});
+	let read_counter_stream = CoolShit::stream_completion_pact(stream, stop_rx.into_stream())
+		.fold(0 as u64, move |recv_count, _| {
+			println!("Adding!");
+			// ok(a + 1) // This doesn't work, type inference fails
+			ok::<_, io::Error>(recv_count + 1)
+		})
+		// .map(|x| c(x))
+		.map_err(|_| ());
+		// .then(move |result| {
+		// 	println!("Client {} done with result: {:?}", index, result);
+		// 	Ok(())
+		// });
 
-	let thing = timer.timeout(final_future, time::Duration::from_millis(1000)).then(move |hmm| {
-		println!("Really done!");
+		// .for_each(move |a| {
+		// 	println!("{:?}", a);
+		// 	Ok(())
+		// })
+		// .then(move |_| {
+		// 	println!("Client {} done", index);
+		// 	Ok(())
+		// });
 
-		println!("hmm: {:?}", hmm);
 
-		Err(())
+	let final_future = send_counter_stream.join(read_counter_stream).then(move |result| {
+		match result {
+			Ok((send_count, read_count)) => println!("Client {} done with result: Sent: {}, Received: {}", index, send_count, read_count),
+			Err(e) => println!("Error: {:?}", e)
+		}
+
+		Ok(())
 	});
 
-	handle.spawn(thing);
+	handle.spawn(final_future);
 	// End Streams
 }
 
@@ -325,31 +300,33 @@ fn main() {
 	if should_run_server {
 		run_server(buf, core);
 	} else {
-		let (tx, rx) = oneshot::channel::<i32>();
+		let (forever_tx, forever_rx) = oneshot::channel::<i32>();
 
-		// let timer = Timer::default(); // Share the timer or else you'll get a thread per client
 		let timer = tokio_timer::wheel().tick_duration(time::Duration::from_millis(30)).build();
 
 		let mut client_chans = Vec::new();
 
 		for n in 0..MAX_CLIENTS {
-			let (tx, rx) = oneshot::channel::<(u16, u64, u64)>(); // Channel of (client_index, receive_count, send_count)
-			client_chans.push(rx);
+			let (tx, rx) = oneshot::channel::<()>(); // Channel of (client_index, receive_count, send_count)
+			client_chans.push(tx);
 
-			run_client(&buf, n as u16, randomize_starts, timer.clone(), core.handle().clone(), tx);
+			run_client(&buf, n as u16, randomize_starts, timer.clone(), core.handle().clone(), rx);
 		}
 
 		let client_delay_timeout = timer.sleep(time::Duration::from_millis(1000)).and_then(|_| {
 			println!("Done!");
 			
-			for rx in client_chans {
-				let thing = rx.wait();
-				println!("{:?}", thing);
+			for transmitter in client_chans {
+				transmitter.send(());
+				// let thing = rx.wait();
+				// println!("{:?}", thing);
 			}
 
 			Ok(())
 		});
 
-		core.run(rx).unwrap();
+		core.run(client_delay_timeout).unwrap();
+
+		core.run(forever_rx).unwrap();
 	}
 }
