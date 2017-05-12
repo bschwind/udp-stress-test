@@ -242,7 +242,7 @@ fn main() {
 		let mut client_chans = Vec::new();
 
 		for n in 0..MAX_CLIENTS {
-			let (tx, rx) = oneshot::channel::<()>(); // Channel of (client_index, receive_count, send_count)
+			let (tx, rx) = oneshot::channel::<()>(); // Channel of Unit to notify clients when the test is done
 			client_chans.push(tx);
 
 			run_client(&buf, n as u16, randomize_starts, run_duration, timer.clone(), core.handle().clone(), rx);
