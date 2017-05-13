@@ -132,14 +132,14 @@ fn run_server(bind_addr: &str, server_port: u16, buf: Vec<u8>, num_clients: usiz
 
 	let (sink, stream) = socket.framed(ServerCodec).split();
 
-	let print_addr_stream = stream.map(|(addr, msg)| {
+	let count_stream = stream.map(|(addr, msg)| {
 		let client_id = LittleEndian::read_u16(&msg);
 		recv_counts[client_id as usize] += 1;
 
 		(addr, msg) // TODO - send buf instead of echoing
 	});
 
-	let echo_stream = print_addr_stream.forward(sink).and_then(|_| Ok(()));
+	let echo_stream = count_stream.forward(sink).and_then(|_| Ok(()));
 	let server = core.run(echo_stream);
 
 	println!("Result: {:?}", server);
@@ -187,7 +187,7 @@ fn run_client(server_ip: &str, server_port: u16, buf: &Vec<u8>, index: u16, rand
 				}
 			}
 
-			(send_count, sink)
+			send_count
 		})
 		.map_err(|_| ());
 
@@ -199,7 +199,7 @@ fn run_client(server_ip: &str, server_port: u16, buf: &Vec<u8>, index: u16, rand
 	// Give the receive loop a bit of extra time to complete
 	let read_timeout = delay_future(run_duration + Duration::from_millis(500) + Duration::from_millis(delay_ms), &handle);
 	let read_counter_future = my_adapters::stream_completion_pact(stream, read_timeout.into_stream())
-		.fold(0 as u64, move |recv_count, _| {
+		.fold(0 as u64, move |recv_count, msg| {
 			// ok(recv_count + 1) // This doesn't work, type inference fails
 			ok::<_, io::Error>(recv_count + 1)
 		})
@@ -210,7 +210,7 @@ fn run_client(server_ip: &str, server_port: u16, buf: &Vec<u8>, index: u16, rand
 		.then(move |result| {
 			match result {
 				Ok((send_count, read_count)) => {
-					let _ = result_tx.send((index, send_count.0, read_count));
+					let _ = result_tx.send((index, send_count, read_count));
 				}
 				Err(e) => {
 					println!("Error: {:?}", e);
@@ -225,7 +225,7 @@ fn run_client(server_ip: &str, server_port: u16, buf: &Vec<u8>, index: u16, rand
 }
 
 fn main() {
-	let matches = App::new("UDP benchmark")
+	let matches = App::new("UDP Stress Test")
 		.version("1.0")
 		.about("Tests UDP throughput with Tokio UDPSockets")
 		.arg(Arg::with_name("as-server")
