@@ -304,11 +304,19 @@ fn main() {
 		let client_results = client_chans.iter_mut().map(|rx| {
 			rx.and_then(|(index, send_count, read_count)| {
 				println!("Client {} done with result: Sent: {}, Received: {}", index, send_count, read_count);
-				Ok(())
+				Ok((send_count, read_count))
 			})
 		});
 
-		let run_clients = futures::future::join_all(client_results);
+		let run_clients = futures::future::join_all(client_results).then(|res| {
+			res.map(|counts| {
+				let totals = counts.into_iter().fold((0, 0), |(acc_send_count, acc_read_count), (send_count, read_count)| {
+					(acc_send_count + send_count, acc_read_count + read_count)
+				});
+
+				println!("Total send/recv: {}/{}", totals.0, totals.1);
+			})
+		});
 
 		core.run(run_clients).unwrap();
 	}
