@@ -146,7 +146,7 @@ fn run_server(bind_addr: &str, server_port: u16, buf: Vec<u8>, num_clients: usiz
 }
 
 fn run_client(server_ip: &str, server_port: u16, buf: &Vec<u8>, index: u16, randomize_starts: bool, run_duration: Duration, tick_rate_hz: u32, timer: Timer, handle: Handle, result_tx: oneshot::Sender<(u16, u64, u64)>) {
-	let addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 0);
+	let addr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), 0);
 	let server_addr = SocketAddr::new(IpAddr::from_str(server_ip).unwrap(), server_port);
 
 	let socket = UdpSocket::bind(&addr, &handle).unwrap();
@@ -279,12 +279,12 @@ fn main() {
 	let server_port = value_t!(matches, "port", u16).unwrap_or(55777);
 	let bind_addr = value_t!(matches, "bind_addr", String).unwrap_or("0.0.0.0".to_string());
 
-	let mut core = Core::new().unwrap();
-	let handle = core.handle();
-
 	if should_run_server {
 		run_server(&bind_addr, server_port, buf, num_clients);
 	} else {
+		let mut core = Core::new().unwrap();
+		let handle = core.handle();
+
 		// This timer is shared so we don't create a thread per client
 		let timer = tokio_timer::wheel().tick_duration(Duration::from_millis(10)).build();
 		let run_duration = Duration::from_secs(duration_seconds);
