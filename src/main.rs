@@ -29,7 +29,7 @@ use tokio_core::reactor::Timeout;
 
 use tokio_timer::Timer;
 
-use futures::Future;
+use futures::future::Future;
 use futures::{Sink, Stream};
 use futures::future::ok;
 use futures::sync::oneshot;
@@ -40,44 +40,34 @@ const MAX_PACKET_BYTES: usize = 1220;
 
 mod my_adapters {
 	use futures::{Async, Stream, Poll};
+	use futures::future::Future;
 
 	// From http://stackoverflow.com/a/42470352
-	pub struct CompletionPact<S, C>
-		where S: Stream,
-			  C: Stream, 
-	{
+	pub struct CompletionPact<S: Stream, C: Future> {
 		stream: S,
 		completer: C,
 	}
 
-	pub fn stream_completion_pact<S, C>(s: S, c: C) -> CompletionPact<S, C>
-		where S: Stream,
-			  C: Stream,
-	{
+	pub fn stream_completion_pact<S: Stream, C: Future>(s: S, c: C) -> CompletionPact<S, C> {
 		CompletionPact {
 			stream: s,
 			completer: c,
 		}
 	}
 
-	impl<S, C> Stream for CompletionPact<S, C>
-		where S: Stream,
-			  C: Stream,
-	{
+	impl<S: Stream, C: Future> Stream for CompletionPact<S, C> {
 		type Item = S::Item;
 		type Error = S::Error;
 
 		fn poll(&mut self) -> Poll<Option<S::Item>, S::Error> {
 			match self.completer.poll() {
-				Ok(Async::Ready(None)) |
-				Err(_) |
-				Ok(Async::Ready(Some(_))) => {
+				Ok(Async::Ready(_)) | Err(_) => {
 					// We are done, forget us
 					Ok(Async::Ready(None))
-				},
+				}
 				Ok(Async::NotReady) => {
 					self.stream.poll()
-				},
+				}
 			}
 		}
 	}
@@ -170,8 +160,8 @@ fn run_client(server_ip: &str, server_port: u16, buf: &Vec<u8>, index: u16, rand
 		0
 	};
 
-	let stop_signal = delay_future(run_duration + Duration::from_millis(delay_ms), &handle);
-	let send_counter_future = my_adapters::stream_completion_pact(send_stream, stop_signal.into_stream())
+	let stop_send_signal = delay_future(run_duration + Duration::from_millis(delay_ms), &handle);
+	let send_counter_future = my_adapters::stream_completion_pact(send_stream, stop_send_signal)
 		.fold((0 as u64, sink), move |(send_count, mut sink), _| {
 			let _ = sink.start_send(send_data.clone()); // TODO - use this result
 
@@ -197,9 +187,9 @@ fn run_client(server_ip: &str, server_port: u16, buf: &Vec<u8>, index: u16, rand
 		});
 
 	// Give the receive loop a bit of extra time to complete
-	let read_timeout = delay_future(run_duration + Duration::from_millis(500) + Duration::from_millis(delay_ms), &handle);
-	let read_counter_future = my_adapters::stream_completion_pact(stream, read_timeout.into_stream())
-		.fold(0 as u64, move |recv_count, msg| {
+	let stop_read_signal = delay_future(run_duration + Duration::from_millis(500) + Duration::from_millis(delay_ms), &handle);
+	let read_counter_future = my_adapters::stream_completion_pact(stream, stop_read_signal)
+		.fold(0 as u64, move |recv_count, _| {
 			// ok(recv_count + 1) // This doesn't work, type inference fails
 			ok::<_, io::Error>(recv_count + 1)
 		})
