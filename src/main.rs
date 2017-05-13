@@ -37,9 +37,6 @@ use futures::IntoFuture;
 use futures::future::FutureResult;
 
 const MAX_PACKET_BYTES: usize = 1220;
-const SERVER_BIND: &str = "0.0.0.0";
-const SERVER_IP: &str = "127.0.0.1";
-const SERVER_PORT: u16 = 55777;
 
 mod my_adapters {
 	use futures::{Async, Stream, Poll};
@@ -123,9 +120,9 @@ fn delay_future(duration: Duration, handle: &Handle) -> futures::Flatten<FutureR
 	Timeout::new(duration, &handle).into_future().flatten()
 }
 
-fn run_server(bind_addr: &str, buf: Vec<u8>, num_clients: usize) {
+fn run_server(bind_addr: &str, server_port: u16, buf: Vec<u8>, num_clients: usize) {
 	let mut recv_counts = vec![0 as u64; num_clients];
-	let addr = SocketAddr::new(IpAddr::from_str(bind_addr).unwrap(), SERVER_PORT);
+	let addr = SocketAddr::new(IpAddr::from_str(bind_addr).unwrap(), server_port);
 
 	let mut core = Core::new().unwrap();
 	let handle = core.handle();
@@ -286,7 +283,7 @@ fn main() {
 	let handle = core.handle();
 
 	if should_run_server {
-		run_server(&bind_addr, buf, num_clients);
+		run_server(&bind_addr, server_port, buf, num_clients);
 	} else {
 		// This timer is shared so we don't create a thread per client
 		let timer = tokio_timer::wheel().tick_duration(Duration::from_millis(10)).build();
@@ -303,8 +300,6 @@ fn main() {
 
 			run_client(&server_host, server_port, &buf, n as u16, randomize_starts, run_duration, tick_rate_hz, timer.clone(), handle.clone(), tx);
 		}
-
-		let start_delay = delay_future(run_duration, &handle);
 
 		let client_results = client_chans.iter_mut().map(|rx| {
 			rx.and_then(|(index, send_count, read_count)| {
